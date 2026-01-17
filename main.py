@@ -1,16 +1,18 @@
+import RPi.GPIO as GPIO
 import tkinter as tk
 from tkinter import Canvas
 import threading
 import time
-import pigpio
 
 # ---------------- CONFIG ----------------
-COACH_IDS = [1, 2, 3, 4]  # Known to Pi
-RX_GPIO = 16  # Nano TX -> Pi RX
-TX_GPIO = 12  # Pi TX -> Nano RX (optional)
+COACH_IDS = [1, 2, 3, 4]      # Known coaches
+TX_GPIO = 12                  # Pi TX → Nano RX (send requests)
+RX_GPIO = 16                  # Pi RX ← Nano TX (receive data)
 BAUD = 9600
-REQUEST_INTERVAL = 2  # seconds per coach
-GUI_REFRESH = 500     # ms
+BIT_TIME = 1.0 / BAUD
+REQUEST_INTERVAL = 2          # seconds between requests
+GUI_REFRESH = 500             # ms
+TEMP_THRESHOLD = 50.0         # Red if temp > threshold
 
 # ---------------- DATA STRUCTURES ----------------
 class CoachNode:
@@ -31,14 +33,12 @@ class TrainLinkedList:
         node = self.nodes[coach_id]
         node.temp = temp
 
-        # Left neighbor
         if left_id != -1:
             if left_id not in self.nodes:
                 self.nodes[left_id] = CoachNode(left_id)
             node.left = self.nodes[left_id]
             self.nodes[left_id].right = node
 
-        # Right neighbor
         if right_id != -1:
             if right_id not in self.nodes:
                 self.nodes[right_id] = CoachNode(right_id)
@@ -71,7 +71,7 @@ class TrainGUI:
 
         node = self.train.head
         while node:
-            color = "red" if node.temp > 50 else "green"
+            color = "red" if node.temp > TEMP_THRESHOLD else "green"
             self.canvas.create_rectangle(x_start, y-30, x_start+width, y+30, fill=color)
             self.canvas.create_text(x_start+width/2, y-10, text=f"Coach {node.coach_id}", font=("Arial", 12, "bold"))
             self.canvas.create_text(x_start+width/2, y+10, text=f"{node.temp:.1f}°C", font=("Arial", 10))
@@ -84,56 +84,76 @@ class TrainGUI:
 
         self.root.after(GUI_REFRESH, self.draw_train)
 
-# ---------------- GPIO SERIAL THREAD ----------------
-class SerialThread(threading.Thread):
+# ---------------- SOFTWARE UART ----------------
+class SoftUART(threading.Thread):
     def __init__(self, train):
-        threading.Thread.__init__(self)
+        super().__init__()
         self.train = train
-        self.pi = pigpio.pi()
-        if not self.pi.connected:
-            raise RuntimeError("Cannot connect to pigpio daemon. Run sudo pigpiod")
-        # Open software serial RX on GPIO12
-        self.pi.bb_serial_read_open(RX_GPIO, BAUD)
-        # TX not used here, Pi only requests
+        self.running = True
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(RX_GPIO, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.setup(TX_GPIO, GPIO.OUT)
+        GPIO.output(TX_GPIO, GPIO.HIGH)
         self.daemon = True
 
+    # Send request to Nano
+    def send_request(self, coach_id):
+        msg = f"REQ,{coach_id}\n"
+        for ch in msg:
+            for i in range(8):
+                GPIO.output(TX_GPIO, (ord(ch) >> i) & 1)
+                time.sleep(BIT_TIME)
+            time.sleep(BIT_TIME)  # stop bit
+        time.sleep(0.01)
+
+    # Read a line from RX_GPIO
+    def read_line(self, timeout=1.0):
+        line = ""
+        start = time.time()
+        while time.time() - start < timeout:
+            if GPIO.input(RX_GPIO) == 0:  # start bit
+                time.sleep(BIT_TIME*1.5)
+                byte = 0
+                for i in range(8):
+                    bit = GPIO.input(RX_GPIO)
+                    byte |= bit << i
+                    time.sleep(BIT_TIME)
+                line += chr(byte)
+                time.sleep(BIT_TIME)  # stop bit
+            if '\n' in line:
+                line, _ = line.split('\n', 1)
+                return line.strip()
+        return None
+
+    # Thread loop
     def run(self):
-        # Infinite loop to request each coach
-        while True:
+        while self.running:
             for coach_id in COACH_IDS:
-                # Send request
-                self.pi.bb_serial_write(TX_GPIO, f"REQ,{coach_id}\n".encode())
-                # Wait for response
-                start = time.time()
-                response = ""
-                while time.time() - start < 1:  # 1 sec timeout
-                    count, data = self.pi.bb_serial_read(RX_GPIO)
-                    if count > 0:
-                        try:
-                            response += data.decode('utf-8')
-                            while '\n' in response:
-                                line, response = response.split('\n', 1)
-                                line = line.strip()
-                                if line.startswith("DATA"):
-                                    parts = line.split(',')
-                                    c_id = int(parts[1])
-                                    temp = float(parts[2])
-                                    left = int(parts[3])
-                                    right = int(parts[4])
-                                    self.train.add_bundle(c_id, temp, left, right)
-                        except:
-                            response = ""
-                time.sleep(0.05)  # tiny delay between requests
+                self.send_request(coach_id)
+                line = self.read_line(timeout=1.0)
+                if line and line.startswith("DATA"):
+                    try:
+                        parts = line.split(',')
+                        c_id = int(parts[1])
+                        temp = float(parts[2])
+                        left = int(parts[3])
+                        right = int(parts[4])
+                        self.train.add_bundle(c_id, temp, left, right)
+                    except:
+                        continue
+                time.sleep(0.05)
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
     train = TrainLinkedList()
     root = tk.Tk()
-    root.geometry("480x320")  # 3.5" TFT resolution
+    root.geometry("480x320")
     root.title("Indian Rail Linked List Temp Monitor")
 
     gui = TrainGUI(root, train)
-    serial_thread = SerialThread(train)
-    serial_thread.start()
+    uart_thread = SoftUART(train)
+    uart_thread.start()
 
     root.mainloop()
+    uart_thread.running = False
+    GPIO.cleanup()
