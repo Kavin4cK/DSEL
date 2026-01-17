@@ -5,14 +5,14 @@ import threading
 import time
 
 # ---------------- CONFIG ----------------
-COACH_IDS = [1, 2, 3, 4]      # Known coaches
-TX_GPIO = 12                  # Pi TX → Nano RX
-RX_GPIO = 16                  # Pi RX ← Nano TX
+RX_GPIO = 16            # Pi RX ← Nano TX
 BAUD = 9600
 BIT_TIME = 1.0 / BAUD
-REQUEST_INTERVAL = 2          # seconds between requests
-GUI_REFRESH = 500             # ms
-TEMP_THRESHOLD = 50.0         # Red if temp > threshold
+GUI_REFRESH = 500       # ms
+TEMP_THRESHOLD = 50.0   # Red if temp > threshold
+
+# ---------------- COACHES ----------------
+COACH_IDS = [1, 2, 3, 4]  # Known coaches
 
 # ---------------- DATA STRUCTURES ----------------
 class CoachNode:
@@ -95,26 +95,14 @@ class SoftUART(threading.Thread):
         self.running = True
         GPIO.setmode(GPIO.BCM)
         GPIO.setup(RX_GPIO, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.setup(TX_GPIO, GPIO.OUT)
-        GPIO.output(TX_GPIO, GPIO.HIGH)
         self.daemon = True
 
-    # Send request to Nano
-    def send_request(self, coach_id):
-        msg = f"REQ,{coach_id}\n"
-        for ch in msg:
-            for i in range(8):
-                GPIO.output(TX_GPIO, (ord(ch) >> i) & 1)
-                time.sleep(BIT_TIME)
-            time.sleep(BIT_TIME)  # stop bit
-        time.sleep(0.01)
-
-    # Read a line from RX_GPIO
-    def read_line(self, timeout=1.0):
+    def read_line(self, timeout=2.0):
+        """Simple bit-banged UART receive. Each Nano continuously broadcasts DATA lines."""
         line = ""
         start = time.time()
         while time.time() - start < timeout:
-            if GPIO.input(RX_GPIO) == 0:  # start bit
+            if GPIO.input(RX_GPIO) == 0:  # start bit detected
                 time.sleep(BIT_TIME*1.5)
                 byte = 0
                 for i in range(8):
@@ -128,25 +116,22 @@ class SoftUART(threading.Thread):
                 return line.strip()
         return None
 
-    # Thread loop
     def run(self):
         while self.running:
-            for coach_id in COACH_IDS:
-                self.send_request(coach_id)
-                line = self.read_line(timeout=1.0)
-                if line:
-                    print("Received:", line)  # DEBUG
-                    if line.startswith("DATA"):
-                        try:
-                            parts = line.split(',')
-                            c_id = int(parts[1])
-                            temp = float(parts[2])
-                            left = int(parts[3])
-                            right = int(parts[4])
-                            self.train.add_bundle(c_id, temp, left, right)
-                        except:
-                            continue
-                time.sleep(0.05)
+            line = self.read_line(timeout=1.0)
+            if line:
+                print("Received:", line)  # DEBUG
+                if line.startswith("DATA"):
+                    try:
+                        parts = line.split(',')
+                        c_id = int(parts[1])
+                        temp = float(parts[2])
+                        left = int(parts[3])
+                        right = int(parts[4])
+                        self.train.add_bundle(c_id, temp, left, right)
+                    except Exception as e:
+                        print("Parse error:", e)
+            time.sleep(0.01)
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
