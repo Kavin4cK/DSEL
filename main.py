@@ -6,8 +6,8 @@ import time
 
 # ---------------- CONFIG ----------------
 COACH_IDS = [1, 2, 3, 4]      # Known coaches
-TX_GPIO = 12                  # Pi TX → Nano RX (send requests)
-RX_GPIO = 16                  # Pi RX ← Nano TX (receive data)
+TX_GPIO = 12                  # Pi TX → Nano RX
+RX_GPIO = 16                  # Pi RX ← Nano TX
 BAUD = 9600
 BIT_TIME = 1.0 / BAUD
 REQUEST_INTERVAL = 2          # seconds between requests
@@ -58,29 +58,32 @@ class TrainGUI:
     def __init__(self, root, train):
         self.root = root
         self.train = train
-        self.canvas = Canvas(root, width=480, height=320, bg="white")
+        self.canvas = Canvas(root, width=320, height=240, bg="white")
         self.canvas.pack(fill="both", expand=True)
         self.root.after(GUI_REFRESH, self.draw_train)
 
     def draw_train(self):
         self.canvas.delete("all")
-        x_start = 20
-        y = 160
-        width = 80
-        spacing = 10
+        if not self.train.head:
+            self.canvas.create_text(160, 120, text="Waiting for data...", font=("Arial", 16, "bold"))
+        else:
+            x_start = 10
+            y = 120
+            width = 60
+            spacing = 10
 
-        node = self.train.head
-        while node:
-            color = "red" if node.temp > TEMP_THRESHOLD else "green"
-            self.canvas.create_rectangle(x_start, y-30, x_start+width, y+30, fill=color)
-            self.canvas.create_text(x_start+width/2, y-10, text=f"Coach {node.coach_id}", font=("Arial", 12, "bold"))
-            self.canvas.create_text(x_start+width/2, y+10, text=f"{node.temp:.1f}°C", font=("Arial", 10))
+            node = self.train.head
+            while node:
+                color = "red" if node.temp > TEMP_THRESHOLD else "green"
+                self.canvas.create_rectangle(x_start, y-25, x_start+width, y+25, fill=color)
+                self.canvas.create_text(x_start+width/2, y-5, text=f"Coach {node.coach_id}", font=("Arial", 10, "bold"))
+                self.canvas.create_text(x_start+width/2, y+10, text=f"{node.temp:.1f}°C", font=("Arial", 9))
 
-            if node.right:
-                self.canvas.create_line(x_start+width, y, x_start+width+spacing, y, arrow=tk.LAST, width=2)
+                if node.right:
+                    self.canvas.create_line(x_start+width, y, x_start+width+spacing, y, arrow=tk.LAST, width=2)
 
-            x_start += width + spacing
-            node = node.right
+                x_start += width + spacing
+                node = node.right
 
         self.root.after(GUI_REFRESH, self.draw_train)
 
@@ -131,23 +134,25 @@ class SoftUART(threading.Thread):
             for coach_id in COACH_IDS:
                 self.send_request(coach_id)
                 line = self.read_line(timeout=1.0)
-                if line and line.startswith("DATA"):
-                    try:
-                        parts = line.split(',')
-                        c_id = int(parts[1])
-                        temp = float(parts[2])
-                        left = int(parts[3])
-                        right = int(parts[4])
-                        self.train.add_bundle(c_id, temp, left, right)
-                    except:
-                        continue
+                if line:
+                    print("Received:", line)  # DEBUG
+                    if line.startswith("DATA"):
+                        try:
+                            parts = line.split(',')
+                            c_id = int(parts[1])
+                            temp = float(parts[2])
+                            left = int(parts[3])
+                            right = int(parts[4])
+                            self.train.add_bundle(c_id, temp, left, right)
+                        except:
+                            continue
                 time.sleep(0.05)
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
     train = TrainLinkedList()
     root = tk.Tk()
-    root.geometry("480x320")
+    root.geometry("320x240")
     root.title("Indian Rail Linked List Temp Monitor")
 
     gui = TrainGUI(root, train)
