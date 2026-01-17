@@ -1,104 +1,98 @@
-import tkinter as tk
 import serial
-import threading
 import time
+import threading
+import tkinter as tk
 
-# ===================== SERIAL CONFIG =====================
-SERIAL_PORT = "/dev/ttyACM0"   # CHANGE if needed
+# ---------------- CONFIG ----------------
+SERIAL_PORT = "/dev/ttyUSB0"
 BAUD_RATE = 9600
-REQUEST_INTERVAL = 1.5         # seconds
+COACH_IDS = [1, 2, 3, 4]
+REQUEST_DELAY = 0.15  # seconds
 
-# ===================== GLOBALS =====================
-ser = None
-running = True
-temps = {
-    "C1": "--.-",
-    "C2": "--.-",
-    "C3": "--.-"
-}
+# ---------------- SERIAL SETUP ----------------
+try:
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    time.sleep(2)  # allow Arduino reset
+except Exception as e:
+    print("Serial open failed:", e)
+    exit(1)
 
-# ===================== SERIAL THREAD =====================
-def serial_worker():
-    global ser
-    try:
-        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-        time.sleep(2)  # Nano reset delay
-    except Exception as e:
-        print("Serial error:", e)
-        return
+# ---------------- DATA STORAGE ----------------
+neighbors = {}      # {id: (left, right)}
+temperatures = {}   # {id: temp}
 
-    while running:
-        for coach in temps.keys():
-            try:
-                cmd = f"GET TEMP {coach}\n"
-                ser.write(cmd.encode())
+# ---------------- SERIAL HELPERS ----------------
+def send(cmd):
+    ser.write((cmd + "\n").encode())
+    ser.flush()
 
-                line = ser.readline().decode().strip()
-                if ":" in line:
-                    cid, val = line.split(":")
-                    if cid in temps:
-                        temps[cid] = val
-            except:
-                pass
+def read_response(timeout=0.5):
+    start = time.time()
+    while time.time() - start < timeout:
+        if ser.in_waiting:
+            return ser.readline().decode().strip()
+    return None
 
-            time.sleep(REQUEST_INTERVAL)
+# ---------------- TRAIN MAPPING ----------------
+def map_train():
+    neighbors.clear()
+    for cid in COACH_IDS:
+        send(f"MAP,{cid}")
+        time.sleep(REQUEST_DELAY)
+        resp = read_response()
+        if resp and resp.startswith("MAP"):
+            _, rid, left, right = resp.split(",")
+            neighbors[int(rid)] = (int(left), int(right))
 
-# ===================== GUI =====================
+# ---------------- TEMP UPDATE LOOP ----------------
+def poll_temperatures():
+    while True:
+        for cid in COACH_IDS:
+            send(f"TEMP,{cid}")
+            time.sleep(REQUEST_DELAY)
+            resp = read_response()
+            if resp and resp.startswith("TEMP"):
+                _, rid, temp = resp.split(",")
+                temperatures[int(rid)] = float(temp)
+        update_gui()
+        time.sleep(1)
+
+# ---------------- GUI ----------------
 root = tk.Tk()
-root.title("Train Coach Temperature")
-root.attributes("-fullscreen", True)
+root.title("Indian Railways – Hot Axle Monitor")
+root.geometry("480x320")
 root.configure(bg="black")
 
-FONT_TITLE = ("Arial", 26, "bold")
-FONT_LABEL = ("Arial", 22)
-FONT_VALUE = ("Arial", 28, "bold")
+title = tk.Label(
+    root,
+    text="HOT AXLE MONITOR",
+    fg="white",
+    bg="black",
+    font=("Arial", 16, "bold")
+)
+title.pack(pady=8)
 
-tk.Label(
-    root, text="TRAIN TEMPERATURE MONITOR",
-    font=FONT_TITLE, fg="cyan", bg="black"
-).pack(pady=20)
+coach_labels = {}
 
-frame = tk.Frame(root, bg="black")
-frame.pack(expand=True)
-
-labels = {}
-
-row = 0
-for coach in temps:
-    tk.Label(
-        frame, text=f"{coach}",
-        font=FONT_LABEL, fg="white", bg="black", width=6
-    ).grid(row=row, column=0, padx=20, pady=15)
-
-    val = tk.Label(
-        frame, text="--.- °C",
-        font=FONT_VALUE, fg="yellow", bg="black", width=10
-    )
-    val.grid(row=row, column=1, padx=20)
-    labels[coach] = val
-
-    row += 1
-
-# ===================== GUI UPDATE LOOP =====================
 def update_gui():
-    for coach, lbl in labels.items():
-        lbl.config(text=f"{temps[coach]} °C")
-    root.after(500, update_gui)
+    for cid in COACH_IDS:
+        temp = temperatures.get(cid, "--")
+        left, right = neighbors.get(cid, ("-", "-"))
+        text = f"Coach {cid} | Temp: {temp} °C | L:{left} R:{right}"
+        coach_labels[cid].config(text=text)
 
-# ===================== EXIT HANDLER =====================
-def on_exit(event=None):
-    global running
-    running = False
-    try:
-        if ser:
-            ser.close()
-    except:
-        pass
-    root.destroy()
+for cid in COACH_IDS:
+    lbl = tk.Label(
+        root,
+        text=f"Coach {cid} | waiting...",
+        fg="cyan",
+        bg="black",
+        font=("Arial", 12)
+    )
+    lbl.pack(anchor="w", padx=10, pady=4)
+    coach_labels[cid] = lbl
 
-root.bind("<Escape>", on_exit)
-
-# ===================== START =====================
-threading.Thread(target=serial_worker, daemon=True).start()
-update_gui()
+# ---------------- START SYSTEM ----------------
+map_train()
+threading.Thread(target=poll_temperatures, daemon=True).start()
 root.mainloop()
